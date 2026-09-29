@@ -27,6 +27,7 @@ mkdir -p build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_C_COMPILER=gcc-14 \
       -DCMAKE_CXX_COMPILER=g++-14 \
+      -DCMAKE_CUDA_HOST_COMPILER=g++-14 \
       -DCMAKE_PREFIX_PATH=$(python3 -c 'import torch;print(torch.utils.cmake_prefix_path)') ..
 make -j$(nproc)
 ctest --output-on-failure   # 全テスト (オフにする場合: cmake -DHISEN_BUILD_TESTS=OFF ..)
