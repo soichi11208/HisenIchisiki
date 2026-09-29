@@ -1,0 +1,2 @@
+/usr/bin/ar qc libhissen_core.a CMakeFiles/hissen_core.dir/src/engine/board.cpp.o CMakeFiles/hissen_core.dir/src/engine/kiki.cpp.o CMakeFiles/hissen_core.dir/src/engine/movegen.cpp.o CMakeFiles/hissen_core.dir/src/engine/blocking.cpp.o CMakeFiles/hissen_core.dir/src/engine/mate.cpp.o CMakeFiles/hissen_core.dir/src/graph/builder.cpp.o CMakeFiles/hissen_core.dir/src/model/gatv2.cpp.o CMakeFiles/hissen_core.dir/src/model/hissen.cpp.o CMakeFiles/hissen_core.dir/src/mcts/search.cpp.o
+/usr/bin/ranlib libhissen_core.a
