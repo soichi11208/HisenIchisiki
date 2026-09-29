@@ -75,6 +75,12 @@ struct EngineState {
   std::unique_ptr<Search> search;
   std::atomic<bool> stopFlag{false};
   std::thread searchThread;
+  // ponder 中の bestmove は USI 仕様上 stop/ponderhit まで出さない。
+  // 早期終了 (ルート詰み/強制詰み発見) した分は保留し、指示が来たら出力する。
+  std::mutex outMtx;
+  bool ponderActive = false;
+  bool hasPendingBest = false;
+  std::string pendingBest;
   std::unordered_map<uint64_t, std::vector<std::pair<Move, uint32_t>>> book;
   std::mutex timerMtx;
   std::condition_variable timerCv;
@@ -83,7 +89,42 @@ struct EngineState {
   GoLimits lastLimits;
 };
 
+// bestmove 出力。ponder 実行中は出力せず保留する (USI: stop/ponderhit まで出さない)。
+void emitOrStash(EngineState& st, const std::string& line) {
+  std::lock_guard<std::mutex> lk(st.outMtx);
+  if (st.ponderActive) {
+    st.pendingBest = line;
+    st.hasPendingBest = true;
+  } else {
+    std::cout << line << std::flush;
+  }
+}
+
+// 保留中の bestmove を破棄する (新局面の開始など、もう不要な場合)。
+void dropPendingBest(EngineState& st) {
+  std::lock_guard<std::mutex> lk(st.outMtx);
+  st.hasPendingBest = false;
+  st.pendingBest.clear();
+}
+
+// stop/ponderhit 時: ponder を終了扱いにし、保留があれば出力する。出力したら true。
+bool flushPendingBest(EngineState& st) {
+  std::string out;
+  {
+    std::lock_guard<std::mutex> lk(st.outMtx);
+    st.ponderActive = false;
+    if (st.hasPendingBest) {
+      out.swap(st.pendingBest);
+      st.hasPendingBest = false;
+    }
+  }
+  if (out.empty()) return false;
+  std::cout << out << std::flush;
+  return true;
+}
+
 void loadBook(EngineState& st) {
+  st.book.clear();
   st.book.clear();
   std::string bp = resolveFile(st.bookPath);
   FILE* f = std::fopen(bp.c_str(), "rb");
@@ -217,14 +258,19 @@ TimeBudget computeBudget(const GoLimits& g, Color side) {
 }
 
 void go(EngineState& st, const GoLimits& lim) {
-  if (!st.search) {
-    std::cout << "info string ERROR search not ready; resigning" << std::endl;
-    std::cout << "bestmove resign" << std::endl;
-    return;
-  }
   joinSearch(st);
+  dropPendingBest(st); // 新しい探索を始めるので前回の保留は破棄
   st.stopFlag = false;
   st.lastLimits = lim;
+  {
+    std::lock_guard<std::mutex> lk(st.outMtx);
+    st.ponderActive = lim.ponder; // ponder 中は bestmove を保留する
+  }
+
+  if (!st.search) {
+    emitOrStash(st, "info string ERROR search not ready; resigning\nbestmove resign\n");
+    return;
+  }
 
   if (!lim.ponder && !lim.infinite) {
     Move bm = probeBook(st);
@@ -232,7 +278,7 @@ void go(EngineState& st, const GoLimits& lim) {
       // ブック手ではツリーが局面と食い違うので破棄
       st.search->clearTree();
       std::cout << "info string book move" << std::endl;
-      std::cout << "bestmove " << usiMove(bm) << std::endl;
+      emitOrStash(st, "bestmove " + usiMove(bm) + "\n");
       return;
     }
   }
@@ -270,7 +316,7 @@ void go(EngineState& st, const GoLimits& lim) {
 
       MctsNode* root = st.search->run(st.pos, st.history, &st.stopFlag, hard, soft);
       if (root->moves.empty()) {
-        std::cout << "bestmove resign" << std::endl;
+        emitOrStash(st, "bestmove resign\n");
         return;
       }
       Move best = st.search->selectMove(*root, 0.f);
@@ -293,18 +339,19 @@ void go(EngineState& st, const GoLimits& lim) {
       if (st.search->lastReuseHit())
         std::cout << "info string tree reuse hit visits=" << visits
                   << " top=" << n1 << "/" << n2 << std::endl;
-      std::cout << "bestmove " << usiMove(best);
-      if (st.ponderEnabled && pm != MOVE_NONE) std::cout << " ponder " << usiMove(pm);
-      std::cout << std::endl;
+      std::string bmLine = "bestmove " + usiMove(best);
+      if (st.ponderEnabled && pm != MOVE_NONE) bmLine += " ponder " + usiMove(pm);
+      bmLine += "\n";
+      emitOrStash(st, bmLine);
     } catch (const std::exception& e) {
       // 例外でプロセスが死ぬと bestmove 無し = 時間切れ。resign で応答して生存確保。
       std::cout << "info string ERROR search exception: " << e.what()
                 << " -- resigning" << std::endl;
-      std::cout << "bestmove resign" << std::endl;
+      emitOrStash(st, "bestmove resign\n");
     } catch (...) {
       std::cout << "info string ERROR search exception: unknown -- resigning"
                 << std::endl;
-      std::cout << "bestmove resign" << std::endl;
+      emitOrStash(st, "bestmove resign\n");
     }
   });
 }
@@ -421,37 +468,45 @@ int main() {
       } else if (cmd == "usinewgame") {
         // 思考中 (残留 ponder) の木を破棄すると use-after-free。先に停止。
         joinSearch(st);
+        dropPendingBest(st);
         st.pos = Position::startpos();
         st.history.clear();
         if (st.search) st.search->clearTree();
       } else if (cmd == "position") {
         // 走っている検索が参照中の st.pos/st.history を書き換えないよう先に停止。
         joinSearch(st);
+        dropPendingBest(st);
         setPosition(st, ss);
       } else if (cmd == "go") {
         go(st, parseGo(ss));
       } else if (cmd == "ponderhit") {
-        GoLimits lim = st.lastLimits;
-        lim.ponder = false;
-        TimeBudget budget = computeBudget(lim, st.pos.side);
-        // 時間情報が無い go ponder では hardMs=0 になる。保険を入れて必ず打ち切る。
-        startTimer(st, budget.hardMs > 0 ? budget.hardMs : kPonderHitFallbackMs);
+        // ponder が早期終了していれば保留分を出力。まだ走っていれば時間制限を課す。
+        if (!flushPendingBest(st)) {
+          GoLimits lim = st.lastLimits;
+          lim.ponder = false;
+          TimeBudget budget = computeBudget(lim, st.pos.side);
+          // 時間情報が無い go ponder では hardMs=0 になる。保険を入れて必ず打ち切る。
+          startTimer(st, budget.hardMs > 0 ? budget.hardMs : kPonderHitFallbackMs);
+        }
       } else if (cmd == "stop") {
         joinSearch(st);
+        flushPendingBest(st);
       } else if (cmd == "quit") {
         joinSearch(st);
+        dropPendingBest(st);
         break;
       } else if (cmd == "gameover") {
         joinSearch(st);
+        dropPendingBest(st);
         if (st.search) st.search->clearTree();
       }
     } catch (const std::exception& e) {
       std::cout << "info string ERROR cmd '" << cmd << "': " << e.what() << std::endl;
-      if (cmd == "go") std::cout << "bestmove resign" << std::endl;
+      if (cmd == "go") emitOrStash(st, "bestmove resign\n");
     } catch (...) {
       std::cout << "info string ERROR cmd '" << cmd << "': unknown exception"
                 << std::endl;
-      if (cmd == "go") std::cout << "bestmove resign" << std::endl;
+      if (cmd == "go") emitOrStash(st, "bestmove resign\n");
     }
   }
   return 0;
