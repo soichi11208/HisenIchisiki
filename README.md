@@ -17,6 +17,7 @@ GNN(GATv2)+Transformer+MCTSによる将棋モデルです。
 - CMake3.18以上
 - GCC/G++14(CUDA12.8搭載のlibtorchでは、GCC16系の最新コンパイラをnvccが拒否するため14指定が必須)
 - pipのtorch(2.9+/cu128系)とNVIDIA GPU(無い場合はCPU動作するが遅い)
+どのOSでも動くはずですが、動作検証はDebain SidのLinux7.12でのみ行っていますし、Linuxを推奨しています。
 
 ## ビルド
 
